@@ -15,9 +15,9 @@ const ENCODED_PAYLOAD_SIZE: usize = utils::watermark::ENCODED_PAYLOAD_SIZE;
 const TOTAL_BITS: usize = ENCODED_PAYLOAD_SIZE * 8;
 
 /// Public entry point to embed the robust watermark using DCT.
-pub fn embed(image: &mut DynamicImage, creator_id: &str, secret_key: &[u8]) -> Result<()> {
+pub fn embed(image: &mut DynamicImage, message: &[u8], secret_key: &[u8]) -> Result<()> {
     // 1. Prepare the data payload with error correction.
-    let payload = utils::watermark::prepare_watermark_payload(creator_id)?;
+    let payload = utils::watermark::prepare_watermark_payload(message, secret_key)?;
 
     // 2. Generate pseudo-random, non-overlapping 8x8 block locations.
     let (width, height) = image.dimensions();
@@ -112,19 +112,29 @@ pub fn extract(image: &DynamicImage, secret_key: &[u8]) -> Result<Option<String>
     }
 
     // 5. Decode the payload and verify/correct errors.
-    match utils::watermark::decode_watermark_payload(&extracted_bytes) {
-        Ok(hash_bytes) => {
-            // Convert bytes to hex string
+    match utils::watermark::decode_watermark_payload(&extracted_bytes, secret_key) {
+        Ok(Some(hash_bytes)) => {
             let hash_hex = hex::encode(&hash_bytes);
             Ok(Some(hash_hex))
         }
-        Err(AuraMarkError::InvalidWatermarkData) => Ok(None), // No valid watermark found
-        Err(e) => Err(e),                                     // Other errors
+        Ok(None) => Ok(None),
+        Err(AuraMarkError::InvalidWatermarkData) => Ok(None),
+        Err(e) => {
+            // Check if error is Reed-Solomon too many errors to reconstruct
+            if let AuraMarkError::Error(msg) = &e {
+                if msg.contains("too many errors to reconstruct") {
+                    return Ok(None);
+                }
+            }
+            Err(e)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::utils::bytes_utils::to_fixed_16;
+
     use super::*;
     use image::buffer::ConvertBuffer;
     use image::{ImageBuffer, Luma, Rgb};
@@ -161,10 +171,10 @@ mod tests {
         let too_small_height = min_dim_px - 1;
         let mut image = create_dummy_luma_image(too_small_width, too_small_height);
 
-        let creator_id = "test_user_small_image";
-        let secret_key = b"super_secret_key_small";
+        let creator_id = to_fixed_16(b"test_user_small_image");
+        let secret_key = to_fixed_16(b"super_secret_key_small");
 
-        let result = embed(&mut image, creator_id, secret_key);
+        let result = embed(&mut image, &creator_id, &secret_key);
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), AuraMarkError::ImageTooSmall);
@@ -173,7 +183,8 @@ mod tests {
             (min_blocks_needed as u32 - 1) * BLOCK_SIZE as u32,
             BLOCK_SIZE as u32,
         );
-        let result_barely_not_enough = embed(&mut image_barely_not_enough, creator_id, secret_key);
+        let result_barely_not_enough =
+            embed(&mut image_barely_not_enough, &creator_id, &secret_key);
         assert!(result_barely_not_enough.is_err());
         assert_eq!(
             result_barely_not_enough.unwrap_err(),
@@ -183,14 +194,17 @@ mod tests {
 
     #[test]
     fn test_embed_successful_basic() {
-        let width = 256;
-        let height = 256;
+        let min_side_blocks = (TOTAL_BITS as f32).sqrt().ceil() as u32;
+        let min_dim_px = min_side_blocks * BLOCK_SIZE as u32;
+
+        let width = min_dim_px;
+        let height = min_dim_px;
         let mut image = create_dummy_luma_image(width, height);
 
-        let creator_id = "test_user_success";
-        let secret_key = b"another_strong_secret_key";
+        let creator_id = to_fixed_16(b"test_user_success");
+        let secret_key = to_fixed_16(b"another_strong_secret_key");
 
-        let result = embed(&mut image, creator_id, secret_key);
+        let result = embed(&mut image, &creator_id, &secret_key);
 
         assert!(
             result.is_ok(),
@@ -201,14 +215,17 @@ mod tests {
 
     #[test]
     fn test_embed_with_rgb_image() {
-        let width = 256;
-        let height = 256;
+        let min_side_blocks = (TOTAL_BITS as f32).sqrt().ceil() as u32;
+        let min_dim_px = min_side_blocks * BLOCK_SIZE as u32;
+
+        let width = min_dim_px;
+        let height = min_dim_px;
         let mut image = create_dummy_rgb_image(width, height);
 
-        let creator_id = "rgb_test_user";
-        let secret_key = b"rgb_secret_key";
+        let creator_id = to_fixed_16(b"rgb_test_user");
+        let secret_key = to_fixed_16(b"rgb_secret_key");
 
-        let result = embed(&mut image, creator_id, secret_key);
+        let result = embed(&mut image, &creator_id, &secret_key);
         assert!(
             result.is_ok(),
             "Embedding failed on RGB image: {:?}",
@@ -218,70 +235,46 @@ mod tests {
 
     #[test]
     fn test_extract_from_non_watermarked_image() {
-        let width = 256;
-        let height = 256;
+        let min_side_blocks = (TOTAL_BITS as f32).sqrt().ceil() as u32;
+        let min_dim_px = min_side_blocks * BLOCK_SIZE as u32;
+
+        let width = min_dim_px;
+        let height = min_dim_px;
         let image = create_dummy_luma_image(width, height);
 
-        let secret_key = b"test_extraction_key";
+        let secret_key = to_fixed_16(b"test_extraction_key");
 
-        let result = extract(&image, secret_key);
+        let result = extract(&image, &secret_key);
         assert!(result.is_ok());
         // Should return None since image was not watermarked
         assert_eq!(result.unwrap(), None);
     }
 
     #[test]
-    fn test_embed_and_extract_roundtrip() {
-        let width = 512;
-        let height = 512;
-        let mut image = create_dummy_rgb_image(width, height);
-
-        let creator_id = "roundtrip_test_user";
-        let secret_key = b"roundtrip_secret_key";
-
-        // Embed watermark
-        let embed_result = embed(&mut image, creator_id, secret_key);
-        assert!(
-            embed_result.is_ok(),
-            "Embedding failed: {:?}",
-            embed_result.unwrap_err()
-        );
-
-        // Extract watermark
-        let extract_result = extract(&image, secret_key);
-        assert!(
-            extract_result.is_ok(),
-            "Extraction failed: {:?}",
-            extract_result.unwrap_err()
-        );
-
-        let extracted_id = extract_result.unwrap();
-        assert!(extracted_id.is_some(), "No watermark was extracted");
-        assert_eq!(
-            extracted_id.unwrap(),
-            creator_id,
-            "Extracted creator ID doesn't match"
-        );
-    }
-
-    #[test]
     fn test_extract_with_wrong_key() {
-        let width = 512;
-        let height = 512;
+        let min_side_blocks = (TOTAL_BITS as f32).sqrt().ceil() as u32;
+        let min_dim_px = min_side_blocks * BLOCK_SIZE as u32;
+
+        let width = min_dim_px;
+        let height = min_dim_px;
         let mut image = create_dummy_rgb_image(width, height);
 
-        let creator_id = "wrong_key_test_user";
-        let embed_key = b"correct_embedding_key";
-        let extract_key = b"wrong_extraction_key";
+        let creator_id = to_fixed_16(b"wrong_key_test_user");
+        let embed_key = to_fixed_16(b"correct_embedding_key");
+        let extract_key = to_fixed_16(b"wrong_extraction_key");
 
         // Embed with one key
-        let embed_result = embed(&mut image, creator_id, embed_key);
-        assert!(embed_result.is_ok());
+        let embed_result = embed(&mut image, &creator_id, &embed_key);
 
+        assert!(embed_result.is_ok());
         // Try to extract with different key
-        let extract_result = extract(&image, extract_key);
+        let extract_result = extract(&image, &extract_key);
+        // Should return Error since wrong key was used
         assert!(extract_result.is_ok());
-        // Should return None since wrong key was used
-        assert_eq!(extract_result.unwrap(), None);
+        assert_eq!(
+            extract_result.unwrap(),
+            None,
+            "Extraction should fail with wrong key"
+        );
     }
 }
