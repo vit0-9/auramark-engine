@@ -1,5 +1,6 @@
 pub mod dct;
 pub mod error;
+pub mod image_handler;
 pub mod robust;
 pub mod utils;
 
