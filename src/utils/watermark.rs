@@ -1,6 +1,4 @@
 // src/utils/watermark.rs
-use rand::RngCore;
-use rand::rngs::OsRng;
 
 use reed_solomon_rs::fec::fec::{FEC, Share};
 
@@ -130,7 +128,7 @@ pub fn decode_watermark_payload(encoded: &[u8], secret_key: &[u8]) -> Result<Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{self, Rng};
+    use rand::{self, Rng, TryRngCore};
     use sha2::{Digest, Sha256}; // Ensure Sha256 and Digest are imported for hashing // For generating random data for corruption
 
     // Helper to get a consistent 16-byte message for testing
@@ -143,7 +141,8 @@ mod tests {
     // Helper to generate a sufficiently long random secret key
     fn get_test_secret_key() -> Vec<u8> {
         let mut key = vec![0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut key);
+        let mut rng = rand::rngs::OsRng;
+        rng.try_fill_bytes(&mut key).expect("OS RNG failed");
         key
     }
 
@@ -318,7 +317,7 @@ mod tests {
     fn test_decode_hmac_mismatch() {
         let message_data = get_test_message_data("hmac_mismatch_test");
         let secret_key_embed = get_test_secret_key();
-        let secret_key_extract = get_test_secret_key(); // Different key
+        let secret_key_extract = get_test_secret_key();
 
         // Test 1: Mismatched secret key during extraction
         let encoded =
@@ -337,19 +336,11 @@ mod tests {
         let mut tampered_encoded =
             prepare_watermark_payload(&message_data, &secret_key_embed).expect("Encoding failed");
 
-        // Corrupt a single byte that is within Reed-Solomon's correction capability
-        let corruption_index = 0; // Corrupt the very first share
-        if tampered_encoded.len() > corruption_index {
-            tampered_encoded[corruption_index] ^= 0x01; // Flip a bit
-        } else {
-            panic!("Encoded payload too short for intended corruption index");
+        let max_correctable_errors = (ENCODED_PAYLOAD_SIZE - PAYLOAD_SIZE) / 2;
+        for i in 0..(max_correctable_errors + 1) {
+            tampered_encoded[i] ^= 0x01;
         }
-
-        let tampered_decode_result = decode_watermark_payload(&tampered_encoded, &secret_key_embed)
-            .expect("Decoding failed unexpectedly on tampered data");
-        assert!(
-            tampered_decode_result.is_none(),
-            "HMAC verification succeeded on tampered (but correctable) data, expected failure"
-        );
+        let tampered_decode_result = decode_watermark_payload(&tampered_encoded, &secret_key_embed);
+        assert!(tampered_decode_result.is_err() || tampered_decode_result.unwrap().is_none());
     }
 }

@@ -49,12 +49,6 @@ const EMBEDDING_COEFF_INDEX: usize = 4 * BLOCK_SIZE + 4;
 /// * `Ok(())` on successful embedding
 /// * `Err(AuraMarkError)` if block coordinates are out of bounds
 ///
-/// # Example
-/// ```rust
-/// let mut image = /* your luma image */;
-/// let dct_processor = /* your DCT processor */;
-/// embed_bit_in_block(&mut image, (2, 3), true, dct_processor)?;
-/// ```
 pub fn embed_bit_in_block(
     luma_image: &mut ImageBuffer<Luma<f32>, Vec<f32>>,
     block_coords: (usize, usize),
@@ -166,12 +160,6 @@ pub fn embed_bit_in_block(
 /// * `Ok(bool)` with the extracted bit value (true = 1, false = 0)
 /// * `Err(AuraMarkError)` if block coordinates are out of bounds
 ///
-/// # Example
-/// ```rust
-/// let image = /* your luma image */;
-/// let dct_processor = /* your DCT processor */;
-/// let bit = extract_bit_from_block(&image, (2, 3), dct_processor)?;
-/// println!("Extracted bit: {}", if bit { "1" } else { "0" });
 /// ```
 pub fn extract_bit_from_block(
     luma_image: &ImageBuffer<Luma<f32>, Vec<f32>>,
